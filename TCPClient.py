@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import time
 
 class Client:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -8,7 +9,10 @@ class Client:
         self.__ip: str = writer.get_extra_info('peername')[0]
         self.__port: int = writer.get_extra_info('peername')[1]
         self.__authenticated = False
-        self.__player_id = str(uuid.uuid4())
+        self.__user_id = str(uuid.uuid4())
+        self.__connected = int(time.time())
+        self.last_command = self.__connected
+        self.active = True
 
     def __str__(self):
         '''
@@ -53,7 +57,8 @@ class Client:
     
     @property
     def id(self):
-        return self.__player_id
+        return self.__user_id
+
     
     def send_message(self, message):
         '''
@@ -70,14 +75,16 @@ class Client:
 
         # TODO: Handle protocol negotiation here
 
-        while "\n" not in msg:
+        while "\n" not in msg and self.active:
             bytes = await self.reader.read(1)
+            if not bytes:
+                self.active = False
+                break
             msg += bytes.decode('utf8')
 
-        
         # strip off newline characters, we add them back in on way out
-        msg.replace("\r", "")
-        msg.replace("\n", "")
+        msg = msg.replace("\r", "")
+        msg = msg.replace("\n", "")
 
-        return msg
+        return msg.strip()
     

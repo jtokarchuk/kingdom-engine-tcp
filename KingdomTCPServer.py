@@ -1,31 +1,30 @@
 import asyncio
-import sys
+import json
 import logging
 import pathlib
 import os
-from TCPClient import Client
-from datetime import datetime
+import redis
+import sys
+from threading import Thread
+import time
+import uuid
 
+from datetime import datetime
+from TCPClient import Client
 
 class Server:
     def __init__(self, ip: str, port: int, loop: asyncio.AbstractEventLoop):
-        '''
-        Parameters
-        ———-
-        ip : str
-            IP that the server will be using
-        port : int
-            Port that the server will be using
-        ———-
-        '''
         self.__ip: str = ip
         self.__port: int = port
         self.__loop: asyncio.AbstractEventLoop = loop
         self.__logger: logging.Logger = self.initialize_logger()
         self.__clients: dict[asyncio.Task, Client] = {}
+        self.__id: str(uuid.uuid4())
 
         self.logger.info(f"Server Initialized with {self.ip}:{self.port}")
-
+        self.gs_send = redis.Redis(host='localhost', port=6379, decode_responses=True)
+        self.running = True
+    
     @property
     def ip(self):
         return self.__ip
@@ -50,10 +49,6 @@ class Server:
         '''
         Initializes a logger and generates a log file in ./logs.
         Returns
-        ——-
-        logging.Logger
-            Used for writing logs of varying levels to the console and log file.
-        ——-
         '''
         path = pathlib.Path(os.path.join(os.getcwd(), "logs"))
         path.mkdir(parents=True, exist_ok=True)
@@ -69,7 +64,7 @@ class Server:
         fh.setLevel(logging.DEBUG)
 
         formatter = logging.Formatter(
-            '[%(asctime)s] – %(levelname)s – %(message)s'
+            '[%(asctime)s] - %(levelname)s - %(message)s'
         )
 
         ch.setFormatter(formatter)
@@ -93,6 +88,7 @@ class Server:
             self.logger.error(e)
         except KeyboardInterrupt:
             self.logger.warning("Keyboard Interrupt Detected. Shutting down!")
+            self.running = False
 
         self.shutdown_server()
 
@@ -100,6 +96,7 @@ class Server:
         '''
         Callback that is used when server accepts clients
         '''
+
         client = Client(client_reader, client_writer)
         task = asyncio.Task(self.handle_client(client))
         self.clients[task] = client
@@ -108,6 +105,9 @@ class Server:
         client_port = client_writer.get_extra_info('peername')[1]
         self.logger.info(f"New Connection: {client_ip}:{client_port}")
 
+        # inform the game server of our presence
+        self.send_gameserver_message(client, None, "new_connection")
+
         task.add_done_callback(self.disconnect_client)
     
 
@@ -115,17 +115,26 @@ class Server:
         '''
         Handles incoming messages from client
         '''
-        while True:
+        while client.active:
             client_message = await client.get_message()
-            # TODO: Send message to game server here
-
-            client.send_message(f"You sent: {client_message}")
-
-            self.logger.info(f"{client_message}")
+            if client_message:
+                self.send_gameserver_message(client, client_message, "game_command")
+                self.logger.info(f"Received: {client_message}")
 
             await client.writer.drain()
 
         self.logger.info("Client Disconnected!")
+
+    def send_gameserver_message(self, client: Client, message, type):
+        gs_message = {
+            "time": int(time.time()),
+            "user_id": client.id,
+            "content": message,
+            "meta": type
+        }
+        self.gs_send.rpush("gs_inbox_telnet", json.dumps(gs_message))
+        client.last_command = gs_message["time"]
+
 
     def broadcast_message(self, message):
         '''
@@ -136,23 +145,44 @@ class Server:
 
     def disconnect_client(self, task: asyncio.Task):
         client = self.clients[task]
-        del self.clients[task]
+        self.send_gameserver_message(client, None, "disconnect")
         client.writer.close()
-        self.logger.info("End Connection")
+        del self.clients[task]
+        
 
     def shutdown_server(self):
         '''
         Shuts down server.
         '''
         self.logger.info("Shutting down server!")
+        server.running = False
         for client in self.clients.values():
             client.send_message('Server is shutting down')
         self.loop.stop()
 
-if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        sys.exit(f"Usage: {sys.argv[0]} HOST_IP PORT")
+def messaging_thread_func(server):
+    gs_receive = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
+    while server.running:
+        message = gs_receive.blpop("gs_outbox_telnet", 1)
+
+        """
+        A message looks like:
+        recipients: list,
+        content: what to send
+        meta: server action (message, disconnect)
+        """
+        if message:
+            for client in server.clients:
+                if client.id in message.recipients:
+                    if message.content:
+                        client.send_message(message.content)
+                    if message.meta == "disconnect":
+                        client.active = False
+
+if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    server = Server(sys.argv[1], sys.argv[2], loop)
+    server = Server("0.0.0.0", 23, loop)
+    thread = Thread(target = messaging_thread_func, args = (server,))
+    thread.start()
     server.start_server()
