@@ -128,11 +128,13 @@ class Server:
     def send_gameserver_message(self, client: Client, message, type):
         gs_message = {
             "time": int(time.time()),
-            "user_id": client.id,
+            "client": "telnet",
+            "ip_address": client.ip,
+            "user_id": client.user_id,
             "content": message,
             "meta": type
         }
-        self.gs_send.rpush("gs_inbox_telnet", json.dumps(gs_message))
+        self.gs_send.rpush("gs_inbox", json.dumps(gs_message))
         client.last_command = gs_message["time"]
 
 
@@ -168,16 +170,17 @@ def messaging_thread_func(server):
 
         """
         A message looks like:
-        recipients: list,
+        user_id: recipient,
         content: what to send
         meta: server action (message, disconnect)
         """
         if message:
-            for client in server.clients:
-                if client.id in message.recipients:
-                    if message.content:
-                        client.send_message(message.content)
-                    if message.meta == "disconnect":
+            message = json.loads(message[1])
+            for client in server.clients.values():
+                if client.user_id in message["user_id"]:
+                    if message["content"]:
+                        client.send_message(message["content"])
+                    if message["meta"] == "disconnect":
                         client.active = False
 
 if __name__ == '__main__':

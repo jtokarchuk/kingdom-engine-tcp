@@ -56,7 +56,7 @@ class Client:
         return self.__authenticated
     
     @property
-    def id(self):
+    def user_id(self):
         return self.__user_id
 
     
